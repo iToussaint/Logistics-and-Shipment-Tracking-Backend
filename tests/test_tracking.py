@@ -4,7 +4,7 @@ from datetime import timedelta
 import psycopg2
 import pytest
 
-from tracking import (
+from app.tracking import (
     connection_pool,
     get_package_history,
     get_package_status,
