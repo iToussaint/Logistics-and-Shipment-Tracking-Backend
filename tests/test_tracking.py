@@ -1,9 +1,20 @@
+import json
+
 import psycopg2
 import pytest
 
-from tracking import connection_pool, process_tracking_scan
+from tracking import (
+    connection_pool,
+    get_package_status,
+    process_tracking_scan,
+    redis_client,
+    scan_logs,
+)
 
 PACKAGE_ID = 1
+TRACKING_ID = "TRK00000001"
+REDIS_KEY = f"package:{TRACKING_ID}:status"
+SCANNER_ID = "TEST-SCANNER"
 
 
 @pytest.fixture
@@ -15,6 +26,7 @@ def cursor():
     original_status = cur.fetchone()[0]
     cur.execute("SELECT max(event_id) FROM tracking_events")
     last_event_id = cur.fetchone()[0]
+    redis_client.delete(REDIS_KEY)
 
     yield cur
 
@@ -27,6 +39,8 @@ def cursor():
     cur.close()
     conn.autocommit = False
     connection_pool.putconn(conn)
+    redis_client.delete(REDIS_KEY)
+    scan_logs.delete_many({"scanner_id": SCANNER_ID})
 
 
 def event_count(cur):
@@ -39,22 +53,35 @@ def current_status(cur):
     return cur.fetchone()[0]
 
 
-def test_scan_inserts_event_and_updates_status(cursor):
+def test_scan_updates_postgres_redis_and_mongo(cursor):
     events_before = event_count(cursor)
 
-    process_tracking_scan(PACKAGE_ID, 3, "In Transit")
+    process_tracking_scan(PACKAGE_ID, 3, "In Transit", SCANNER_ID)
 
     assert event_count(cursor) == events_before + 1
     assert current_status(cursor) == "In Transit"
+    assert json.loads(redis_client.get(REDIS_KEY)) == {"status": "In Transit", "location": "Atlanta, GA"}
+    log = scan_logs.find_one({"scanner_id": SCANNER_ID})
+    assert log["result"] == "success"
+    assert log["package_id"] == PACKAGE_ID
 
 
-def test_failed_scan_rolls_back_status_update(cursor):
+def test_failed_scan_rolls_back_and_is_logged(cursor):
     events_before = event_count(cursor)
     status_before = current_status(cursor)
 
     # The UPDATE succeeds, then the INSERT fails on the unknown location.
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
-        process_tracking_scan(PACKAGE_ID, 9999, "Exception")
+        process_tracking_scan(PACKAGE_ID, 9999, "Exception", SCANNER_ID)
 
     assert event_count(cursor) == events_before
     assert current_status(cursor) == status_before
+    assert redis_client.get(REDIS_KEY) is None
+    assert scan_logs.find_one({"scanner_id": SCANNER_ID})["result"] == "failed"
+
+
+def test_cache_miss_falls_back_to_postgres(cursor):
+    status = get_package_status(TRACKING_ID)
+
+    assert status == {"status": current_status(cursor), "location": "Houston, TX"}
+    assert json.loads(redis_client.get(REDIS_KEY)) == status
