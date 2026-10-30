@@ -45,3 +45,6 @@ CREATE TABLE tracking_events (
                           'Out for Delivery', 'Delivered', 'Exception')),
     event_timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Speeds up rebuilding one package's history in time order (see benchmark.sql).
+CREATE INDEX idx_tracking_events_package_time ON tracking_events (package_id, event_timestamp);
