@@ -100,3 +100,32 @@ def get_package_status(tracking_id):
     status, location = row
     cache_status(tracking_id, status, location)
     return {"status": status, "location": location}
+
+
+def get_package_history(tracking_id):
+    conn = connection_pool.getconn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH package_events AS (
+                        SELECT e.event_timestamp, e.status, l.city || ', ' || l.state AS location
+                        FROM tracking_events e
+                        JOIN packages p ON p.package_id = e.package_id
+                        JOIN locations l ON l.location_id = e.location_id
+                        WHERE p.tracking_id = %s
+                    )
+                    SELECT event_timestamp,
+                           status,
+                           location,
+                           event_timestamp - LAG(event_timestamp) OVER (ORDER BY event_timestamp)
+                               AS time_since_previous
+                    FROM package_events
+                    ORDER BY event_timestamp
+                    """,
+                    (tracking_id,),
+                )
+                return cur.fetchall()
+    finally:
+        connection_pool.putconn(conn)

@@ -1,10 +1,12 @@
 import json
+from datetime import timedelta
 
 import psycopg2
 import pytest
 
 from tracking import (
     connection_pool,
+    get_package_history,
     get_package_status,
     process_tracking_scan,
     redis_client,
@@ -85,3 +87,12 @@ def test_cache_miss_falls_back_to_postgres(cursor):
 
     assert status == {"status": current_status(cursor), "location": "Houston, TX"}
     assert json.loads(redis_client.get(REDIS_KEY)) == status
+
+
+def test_history_is_ordered_with_time_between_events():
+    history = get_package_history("TRK00000004")
+
+    statuses = [status for _, status, _, _ in history]
+    gaps = [gap for _, _, _, gap in history]
+    assert statuses == ["Created", "Picked Up", "In Transit", "Out for Delivery", "Delivered"]
+    assert gaps == [None] + [timedelta(hours=10)] * 4
