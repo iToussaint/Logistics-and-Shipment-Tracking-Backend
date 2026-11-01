@@ -112,3 +112,59 @@ updating both in the same transaction.
 - `package_metadata` is a `JSONB` column for flexible package attributes such as
   `{"fragile": true, "requires_signature": false}`.
 - Composite index `idx_tracking_events_package_time` on `tracking_events (package_id, event_timestamp)`.
+
+## How a Scan Is Processed
+
+`process_tracking_scan(package_id, location_id, status, scanner_id)` in `app/tracking.py`:
+
+1. Takes a connection from the psycopg2 connection pool.
+2. In **one transaction**, updates `packages.current_status` and inserts a row into
+   `tracking_events`. If either statement fails, both are rolled back. All queries use
+   parameterized placeholders (`%s`), never string formatting.
+3. Logs the raw scan to MongoDB (`scan_logs`) with the scanner ID, timestamp and scan
+   details. Failed scans are logged too, with `result: "failed"` and the error message, so
+   the audit trail contains every scan.
+4. After a successful commit, caches the latest status in Redis:
+
+   ```
+   key:   package:<tracking_id>:status
+   value: {"status": "In Transit", "location": "City, ST"}
+   ```
+
+`get_package_status(tracking_id)` reads from Redis first. On a cache miss it reads the
+latest status from PostgreSQL and stores it in Redis (cache-aside).
+
+## Tracking History Query
+
+`get_package_history(tracking_id)` rebuilds a package's full history. A CTE collects the
+package's events with their locations, and `LAG()` computes the time since the previous
+event:
+
+```sql
+WITH package_events AS (
+    SELECT e.event_timestamp, e.status, l.city || ', ' || l.state AS location
+    FROM tracking_events e
+    JOIN packages p ON p.package_id = e.package_id
+    JOIN locations l ON l.location_id = e.location_id
+    WHERE p.tracking_id = %s
+)
+SELECT event_timestamp,
+       status,
+       location,
+       event_timestamp - LAG(event_timestamp) OVER (ORDER BY event_timestamp) AS time_since_previous
+FROM package_events
+ORDER BY event_timestamp;
+```
+
+Example result for a package after four scans:
+
+```
+event_timestamp      status            location         time_since_previous
+2026-09-01 00:06:00  Created           Chicago, IL
+2026-11-01 23:58:04  Picked Up         Chicago, IL      61 days, 23:52:04.333002
+2026-11-01 23:58:04  In Transit        Los Angeles, CA  0:00:00.053038
+2026-11-01 23:58:04  Out for Delivery  New York, NY     0:00:00.005607
+2026-11-01 23:58:04  Delivered         New York, NY     0:00:00.005292
+```
+
+The last four scans ran back to back, so the gaps between them are fractions of a second.
