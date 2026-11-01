@@ -168,3 +168,51 @@ event_timestamp      status            location         time_since_previous
 ```
 
 The last four scans ran back to back, so the gaps between them are fractions of a second.
+
+## Performance Report (`EXPLAIN ANALYZE`)
+
+The history query was benchmarked on the seed data (102,000 tracking events, plus two
+manual test scans, hence 102,002 rows below) for package
+`TRK00000004`, which has 5 events. `sql/benchmark.sql` contains the exact steps: drop the
+index, run `EXPLAIN ANALYZE`, create the index, run `EXPLAIN ANALYZE` again.
+
+**Before:** no index on `tracking_events (package_id, event_timestamp)`
+
+```
+->  Hash Join  (actual time=0.241..20.947 rows=5 loops=1)
+      Hash Cond: (e.package_id = p.package_id)
+      ->  Seq Scan on tracking_events e  (actual time=0.005..8.867 rows=102002 loops=1)
+      ->  Hash
+            ->  Index Scan using packages_tracking_id_key on packages p
+Planning Time: 2.773 ms
+Execution Time: 21.535 ms
+```
+
+PostgreSQL reads all 102,002 tracking events to find the 5 that belong to the package.
+
+**After:** with the composite index
+
+```sql
+CREATE INDEX idx_tracking_events_package_time ON tracking_events (package_id, event_timestamp);
+```
+
+```
+->  Nested Loop  (actual time=0.114..0.125 rows=5 loops=1)
+      ->  Index Scan using packages_tracking_id_key on packages p
+      ->  Bitmap Heap Scan on tracking_events e  (actual time=0.090..0.098 rows=5 loops=1)
+            ->  Bitmap Index Scan on idx_tracking_events_package_time  (actual time=0.051..0.051 rows=5 loops=1)
+                  Index Cond: (package_id = p.package_id)
+Planning Time: 1.856 ms
+Execution Time: 0.343 ms
+```
+
+The index lets PostgreSQL jump straight to the package's 5 rows instead of scanning the whole table.
+
+| Measurement           | Before index        | After index                       |
+|-----------------------|---------------------|-----------------------------------|
+| Scan on `tracking_events` | Seq Scan (102,002 rows read) | Bitmap Index Scan (5 rows read) |
+| Execution time        | 21.535 ms           | 0.343 ms                          |
+| Improvement           |                     | **~63× faster**                   |
+
+The sequential scan grows with the size of the whole table, while the index lookup depends
+only on how many events one package has. The gap therefore widens as more scans are stored.
