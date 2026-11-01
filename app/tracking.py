@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import psycopg2
 import redis
@@ -25,32 +25,31 @@ def process_tracking_scan(package_id, location_id, status, scanner_id):
         "package_id": package_id,
         "location_id": location_id,
         "status": status,
-        "scanned_at": datetime.now(timezone.utc),
+        "scanned_at": datetime.now(UTC),
     }
 
     conn = connection_pool.getconn()
     try:
         # "with conn" commits if all statements succeed and rolls back if any fails.
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE packages SET current_status = %s WHERE package_id = %s",
-                    (status, package_id),
-                )
-                cur.execute(
-                    "INSERT INTO tracking_events (package_id, location_id, status) VALUES (%s, %s, %s)",
-                    (package_id, location_id, status),
-                )
-                cur.execute(
-                    """
-                    SELECT p.tracking_id, l.city || ', ' || l.state
-                    FROM packages p
-                    JOIN locations l ON l.location_id = %s
-                    WHERE p.package_id = %s
-                    """,
-                    (location_id, package_id),
-                )
-                tracking_id, location = cur.fetchone()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE packages SET current_status = %s WHERE package_id = %s",
+                (status, package_id),
+            )
+            cur.execute(
+                "INSERT INTO tracking_events (package_id, location_id, status) VALUES (%s, %s, %s)",
+                (package_id, location_id, status),
+            )
+            cur.execute(
+                """
+                SELECT p.tracking_id, l.city || ', ' || l.state
+                FROM packages p
+                JOIN locations l ON l.location_id = %s
+                WHERE p.package_id = %s
+                """,
+                (location_id, package_id),
+            )
+            tracking_id, location = cur.fetchone()
     except psycopg2.Error as error:
         # Failed scans are still logged so the audit trail has every raw scan.
         scan_logs.insert_one({**log_entry, "result": "failed", "error": str(error)})
@@ -77,21 +76,20 @@ def get_package_status(tracking_id):
     # Cache miss: read the latest status from Postgres and cache it.
     conn = connection_pool.getconn()
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT p.current_status, l.city || ', ' || l.state
-                    FROM packages p
-                    JOIN tracking_events e ON e.package_id = p.package_id
-                    JOIN locations l ON l.location_id = e.location_id
-                    WHERE p.tracking_id = %s
-                    ORDER BY e.event_timestamp DESC
-                    LIMIT 1
-                    """,
-                    (tracking_id,),
-                )
-                row = cur.fetchone()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.current_status, l.city || ', ' || l.state
+                FROM packages p
+                JOIN tracking_events e ON e.package_id = p.package_id
+                JOIN locations l ON l.location_id = e.location_id
+                WHERE p.tracking_id = %s
+                ORDER BY e.event_timestamp DESC
+                LIMIT 1
+                """,
+                (tracking_id,),
+            )
+            row = cur.fetchone()
     finally:
         connection_pool.putconn(conn)
 
@@ -105,10 +103,9 @@ def get_package_status(tracking_id):
 def get_package_history(tracking_id):
     conn = connection_pool.getconn()
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     WITH package_events AS (
                         SELECT e.event_timestamp, e.status, l.city || ', ' || l.state AS location
                         FROM tracking_events e
@@ -124,8 +121,8 @@ def get_package_history(tracking_id):
                     FROM package_events
                     ORDER BY event_timestamp
                     """,
-                    (tracking_id,),
-                )
-                return cur.fetchall()
+                (tracking_id,),
+            )
+            return cur.fetchall()
     finally:
         connection_pool.putconn(conn)

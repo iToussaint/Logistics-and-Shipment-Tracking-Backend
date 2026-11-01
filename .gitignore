@@ -1,5 +1,4 @@
-instructions.md
-Logistics and Shipment Tracking.md
 .venv/
 __pycache__/
 .pytest_cache/
+main.py
